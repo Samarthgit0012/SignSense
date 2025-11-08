@@ -1,0 +1,102 @@
+package com.signsense.service;
+
+import com.signsense.domain.entities.User;
+import com.signsense.domain.repositories.UserRepository;
+import com.signsense.dto.AuthRequest;
+import com.signsense.dto.AuthResponse;
+import com.signsense.dto.RegisterRequest;
+import com.signsense.util.JwtUtil;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class AuthService {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private JwtUtil jwtUtil;
+
+    @Autowired
+    private AuthenticationManager authenticationManager;
+    
+    @PersistenceContext
+    private EntityManager entityManager;
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public String register(RegisterRequest request) {
+        if (userRepository.findByEmail(request.getEmail()).isPresent()) {
+            throw new RuntimeException("Email already exists");
+        }
+
+        User user = new User();
+        user.setName(request.getName());
+        user.setEmail(request.getEmail());
+        user.setPassword(passwordEncoder.encode(request.getPassword()));
+        user.setRole("USER");
+
+        user = userRepository.saveAndFlush(user); // Save and flush immediately
+        entityManager.clear(); // Clear persistence context
+        
+        System.out.println("✅ User registered with ID: " + user.getId());
+        
+        // Verify the user was actually saved
+        boolean exists = userRepository.existsById(user.getId());
+        System.out.println("✅ User exists in DB: " + exists);
+        
+        return "User registered successfully";
+    }
+
+    public AuthResponse login(AuthRequest request) {
+        try {
+            System.out.println("🔐 Attempting to authenticate user: " + request.getEmail());
+            System.out.println("🔑 Raw password length: " + (request.getPassword() != null ? request.getPassword().length() : "null"));
+
+            // --- debug: inspect stored password and matching result ---
+            User foundUser = userRepository.findByEmail(request.getEmail()).orElse(null);
+            if (foundUser == null) {
+                System.err.println("❌ User not found in database: " + request.getEmail());
+                throw new RuntimeException("Invalid email or password");
+            }
+            
+            System.out.println("✓ User found: " + foundUser.getEmail());
+            System.out.println("🗄️ Stored password hash: " + foundUser.getPassword());
+            System.out.println("� Hash starts with $2: " + (foundUser.getPassword().startsWith("$2")));
+            boolean matches = passwordEncoder.matches(request.getPassword(), foundUser.getPassword());
+            System.out.println("🔁 passwordEncoder.matches(raw, stored): " + matches);
+            
+            if (!matches) {
+                System.err.println("❌ Password does not match! Raw pwd vs stored hash mismatch.");
+            }
+            // --- end debug ---
+
+            Authentication authentication = authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
+            );
+            System.out.println("✅ Authentication successful for: " + request.getEmail());
+
+            String token = jwtUtil.generateToken(request.getEmail());
+            return new AuthResponse(token, request.getEmail());
+        } catch (BadCredentialsException e) {
+            System.err.println("❌ Bad credentials for user: " + request.getEmail());
+            throw new RuntimeException("Invalid email or password");
+        } catch (Exception e) {
+            System.err.println("❌ Authentication failed: " + e.getMessage());
+            e.printStackTrace();
+            throw new RuntimeException("Authentication failed: " + e.getMessage());
+        }
+    }
+}
